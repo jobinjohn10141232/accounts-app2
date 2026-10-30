@@ -1,0 +1,82 @@
+# Builds the Android APK in the cloud. Push this repository to GitHub, open the
+# "Actions" tab, run "Build Android APK", and download the APK from the run's artifacts.
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'android-app/**'
+      - 'android-app.zip'
+      - '.github/workflows/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android-app
+    steps:
+      - uses: actions/checkout@v4
+
+      # If the source was uploaded as a single android-app.zip (easiest from the GitHub
+      # website), unpack it here. If an android-app/ folder was uploaded, this does nothing.
+      - name: Unpack android-app.zip (if present)
+        working-directory: .
+        run: |
+          if [ -f android-app.zip ]; then
+            unzip -o -q android-app.zip
+            echo "Unpacked android-app.zip"
+          fi
+          if [ ! -f android-app/pubspec.yaml ]; then
+            echo "::error::android-app/pubspec.yaml not found. Upload android-app.zip to the top level of the repository."
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Generates the standard Android Gradle scaffolding. Existing files
+      # (AndroidManifest.xml, MainActivity.kt, lib/, test/) are NOT overwritten.
+      - name: Generate platform scaffolding
+        run: flutter create --org com.personal --project-name personal_accounts_manager --platforms android .
+
+      - name: Optional release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.jks
+            printf "storeFile=release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
+            python3 tool/apply_signing.py android/app/build.gradle.kts
+            echo "Release signing configured."
+          else
+            echo "No signing secrets: the APK is signed with the debug key (fine for personal installation)."
+          fi
+
+      - run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Unit & widget tests
+        run: flutter test
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: personal-accounts-manager-apk
+          path: android-app/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
